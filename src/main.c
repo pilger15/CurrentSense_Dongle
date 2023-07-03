@@ -60,8 +60,7 @@ void usb_task(void *pvParameters)
 
     memset(buffer_espnow_rx, 0x55, sizeof(buffer_espnow_rx) * sizeof(uint8_t));
     ESP_LOGI("USB", "USB initialised");
-    int len = 0;
-    uint8_t msg = 0;
+    uint8_t cnt = 0;
     while (true)
     {
         if (send)
@@ -69,13 +68,12 @@ void usb_task(void *pvParameters)
             send--;
 
             // usb_serial_jtag_write_bytes(header, 4, 1 / portTICK_PERIOD_MS);
-            usb_serial_jtag_write_bytes(&buffer_espnow_rx[send][0], ADC_BUFFER_LEN + ESP_NOW_ETH_ALEN, 1 / portTICK_PERIOD_MS);
+            usb_serial_jtag_write_bytes(&buffer_espnow_rx[send][0], ADC_BUFFER_LEN + ESP_NOW_ETH_ALEN, portMAX_DELAY);
         }
-        else if (usb_serial_jtag_read_bytes(buffer_usb_rx, USB_MESSAGE_LEN, 1 / portTICK_PERIOD_MS))
+        else if (usb_serial_jtag_read_bytes(buffer_usb_rx, USB_MESSAGE_LEN, pdMS_TO_TICKS(1)))
         {
             // len = usb_serial_jtag_ll_read_rxfifo(buffer1, ADC_BUFFER_LEN * sizeof(uint8_t));
             REG_WRITE(GPIO_OUT_W1TS_REG, BIT2); // LOW
-            msg = buffer_usb_rx[0];
             esp_err_t ret = esp_now_send(peer->peer_addr, buffer_usb_rx, 1);
             if (ret != ESP_OK)
             {
@@ -83,10 +81,7 @@ void usb_task(void *pvParameters)
             }
             REG_WRITE(GPIO_OUT_W1TC_REG, BIT2); // LOW
         }
-        else
-        {
-            vTaskDelay(1);
-        }
+        taskYIELD();
     }
 }
 
@@ -120,7 +115,7 @@ static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status
 void app_main()
 {
     esp_err_t ret;
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    vTaskDelay(pdMS_TO_TICKS(1000));
     // Initialize NVS
     gpio_set_direction(GPIO_NUM_2, GPIO_MODE_OUTPUT);
     REG_WRITE(GPIO_OUT_W1TC_REG, BIT2); // LOW
@@ -162,7 +157,9 @@ void app_main()
 
     uint8_t mac_address[6];
     esp_wifi_get_mac(ESP_IF_WIFI_STA, mac_address);
-
+    ESP_LOGI("IDLE", "%02x:%02x:%02x:%02x:%02x:%02x\n",
+             mac_address[0], mac_address[1], mac_address[2],
+             mac_address[3], mac_address[4], mac_address[5]);
     xTaskCreate(usb_task, "usb_task", configMINIMAL_STACK_SIZE * 4, NULL, tskIDLE_PRIORITY, NULL);
 
     while (0)
