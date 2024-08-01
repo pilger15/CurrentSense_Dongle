@@ -3,24 +3,22 @@
 
 #include <stdio.h>
 #include <string.h>
+
+#include "driver/gpio.h"
+#include "driver/gptimer.h"
+#include "driver/uart.h"
+#include "driver/usb_serial_jtag.h"
+#include "esp_log.h"
+#include "esp_now.h"
+#include "esp_private/esp_wifi_types_private.h"
+#include "esp_private/wifi.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_wifi.h"
-#include "esp_now.h"
-#include "esp_private/wifi.h"
-#include "esp_private/esp_wifi_types_private.h"
-#include "driver/gptimer.h"
-
-#include "driver/uart.h"
-#include "driver/gpio.h"
-#include "soc/gpio_reg.h"
-#include "sdkconfig.h"
-#include "esp_log.h"
-#include "nvs_flash.h"
-
-#include "driver/uart.h"
 #include "hal/usb_serial_jtag_ll.h"
-#include "driver/usb_serial_jtag.h"
+#include "nvs_flash.h"
+#include "sdkconfig.h"
+#include "soc/gpio_reg.h"
 
 // Define the structure for the data to be received over ESP-NOW
 #define ADC_BUFFER_LEN (ESP_NOW_MAX_DATA_LEN)
@@ -53,8 +51,7 @@ static const uint8_t espcommand_channel[8] = {0x74, 0x79, 0x73, 0x80, 0xec, 0x3c
 
 uint8_t send = 0;
 char header[] = {'D', 'A', 'T', 'A'};
-void usb_task(void *pvParameters)
-{
+void usb_task(void *pvParameters) {
     /* Configure USB-CDC */
     usb_serial_jtag_driver_config_t usb_serial_config = {
         .tx_buffer_size = ADC_BUFFER_LEN + ESP_NOW_ETH_ALEN,
@@ -66,67 +63,54 @@ void usb_task(void *pvParameters)
     memset(buffer_espnow_rx, 0x55, sizeof(buffer_espnow_rx) * sizeof(uint8_t));
     ESP_LOGI("USB", "USB initialised");
 
-    while (true)
-    {
-        if (send)
-        {
+    while (true) {
+        if (send) {
             send--;
 
             usb_serial_jtag_write_bytes(header, 4, portMAX_DELAY);
             usb_serial_jtag_write_bytes(&buffer_espnow_rx[send][0], ADC_BUFFER_LEN + ESP_NOW_ETH_ALEN, portMAX_DELAY);
-        }
-        else if (usb_serial_jtag_read_bytes(buffer_usb_rx, USB_MESSAGE_LEN, pdMS_TO_TICKS(1)))
-        {
+            usb_serial_jtag_ll_txfifo_flush();
+        } else if (usb_serial_jtag_read_bytes(buffer_usb_rx, USB_MESSAGE_LEN, pdMS_TO_TICKS(1))) {
             // len = usb_serial_jtag_ll_read_rxfifo(buffer1, ADC_BUFFER_LEN * sizeof(uint8_t));
             ESP_LOGI("ESP-NOW", "Received USB-command. Starting measurement");
-            REG_WRITE(GPIO_OUT_W1TS_REG, BIT2); // LOW
+            REG_WRITE(GPIO_OUT_W1TS_REG, BIT2);  // LOW
             esp_err_t ret = esp_now_send(peer_broadcast->peer_addr, buffer_usb_rx, 1);
-            if (ret != ESP_OK)
-            {
+            if (ret != ESP_OK) {
                 ESP_LOGE("ESP-NOW", "Error sending data: %s", esp_err_to_name(ret));
             }
-            REG_WRITE(GPIO_OUT_W1TC_REG, BIT2); // LOW
+            REG_WRITE(GPIO_OUT_W1TC_REG, BIT2);  // LOW
         }
         taskYIELD();
     }
 }
 
 // Define the callback function to handle received data
-void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int data_len)
-{
+void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int data_len) {
     // Cast the received data to the defined structure
-    if (data_len <= ESP_NOW_MAX_DATA_LEN)
-    {
+    if (data_len <= ESP_NOW_MAX_DATA_LEN) {
         memcpy(&buffer_espnow_rx[send][0], esp_now_info->src_addr, ESP_NOW_ETH_ALEN);
         memcpy(&buffer_espnow_rx[send][ESP_NOW_ETH_ALEN], data, data_len);
         // usb_serial_jtag_write_bytes(&buffer_espnow_rx[send][0], 2, 1 / portTICK_PERIOD_MS);
         // ESP_LOGE("WARNING", "\nDATA %d - %d Buffer", ((uint16_t)data[3] << 8 | data[2]), ((uint16_t)buffer_espnow_rx[send][3] << 8) | buffer_espnow_rx[send][2]);
 
         send++;
-        if (send >= NUM_BUFFER) // overflow
+        if (send >= NUM_BUFFER)  // overflow
         {
         }
-    }
-    else
-    {
+    } else {
         // Handle the case when the received data size is larger than the buffer size
         // You may choose to truncate the data or handle it in a different way based on your application's requirements.
         // Here, we are printing an error message.
         ESP_LOGE("ESP-NOW", "Received data size is larger than the buffer size");
     }
 }
-static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status)
-{
+static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status) {
 }
 
-void esp_now_channel_broadcast(void *pvParameters)
-{
-    while (1)
-    {
-
+void esp_now_channel_broadcast(void *pvParameters) {
+    while (1) {
         vTaskDelay(pdMS_TO_TICKS(5000));
-        if (esp_now_is_peer_exist(peer_broadcast->peer_addr))
-        { // double-check
+        if (esp_now_is_peer_exist(peer_broadcast->peer_addr)) {  // double-check
             ESP_LOGI("ESP-NOW", "Broadcasting channel for registration\nChannel %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x",
                      espcommand_channel[0],
                      espcommand_channel[1],
@@ -141,16 +125,14 @@ void esp_now_channel_broadcast(void *pvParameters)
     }
 }
 
-void app_main()
-{
+void app_main() {
     esp_err_t ret;
     vTaskDelay(pdMS_TO_TICKS(1000));
     // Initialize NVS
     gpio_set_direction(GPIO_NUM_2, GPIO_MODE_OUTPUT);
-    REG_WRITE(GPIO_OUT_W1TC_REG, BIT2); // LOW
+    REG_WRITE(GPIO_OUT_W1TC_REG, BIT2);  // LOW
     ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
-    {
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
@@ -193,8 +175,7 @@ void app_main()
 
     xTaskCreate(esp_now_channel_broadcast, "esp_now_channel_broadcast", configMINIMAL_STACK_SIZE * 4, NULL, tskIDLE_PRIORITY, NULL);
 
-    while (0)
-    {
+    while (0) {
         vTaskDelay(10000 / portTICK_PERIOD_MS);
         ESP_LOGI("IDLE", "%02x:%02x:%02x:%02x:%02x:%02x\n",
                  mac_address[0], mac_address[1], mac_address[2],
