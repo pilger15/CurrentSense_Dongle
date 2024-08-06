@@ -24,12 +24,22 @@
 #define ADC_BUFFER_LEN (ESP_NOW_MAX_DATA_LEN)
 #define BUFFER_SCALE 8
 uint16_t buffer_idx = 0;
-#define NUM_BUFFER 8
+#define NUM_BUFFER 16
 bool buffer_sel = false;
 bool buffer_sel_prev = false;
 uint8_t buffer_espnow_rx[NUM_BUFFER][ADC_BUFFER_LEN + ESP_NOW_ETH_ALEN];
 #define USB_MESSAGE_LEN 16
 uint8_t buffer_usb_rx[USB_MESSAGE_LEN];
+
+typedef enum {
+    espcommand_empty,
+    espcommand_start,
+    espcommand_stop,
+    // espcommand_wifiTx_power - commands 8-80 will be interpretted as WiFi power changes
+} esp_command_t;
+
+bool isRecording = false;
+
 // a0:76:4e:44:51:38
 
 // static uint8_t sensor_mac2[ESP_NOW_ETH_ALEN] = {0xA0, 0x76, 0x4E, 0x44, 0x51, 0x38};
@@ -49,7 +59,9 @@ static const uint8_t espcommand_channel[8] = {0x74, 0x79, 0x73, 0x80, 0xec, 0x3c
 #define UART_TX_GPIO_NUM UART_PIN_NO_CHANGE
 #define UART_RX_GPIO_NUM UART_PIN_NO_CHANGE
 
-uint8_t send = 0;
+uint8_t buffer_count = 0;  // tracks the
+uint8_t buffer_write_index = 0;
+uint8_t buffer_read_index = 0;
 char header[] = {'D', 'A', 'T', 'A'};
 void usb_task(void *pvParameters) {
     /* Configure USB-CDC */
@@ -64,13 +76,25 @@ void usb_task(void *pvParameters) {
     ESP_LOGI("USB", "USB initialised");
 
     while (true) {
-        if (send) {
-            send--;
+        if (buffer_count) {
+            buffer_count--;
 
             usb_serial_jtag_write_bytes(header, 4, portMAX_DELAY);
-            usb_serial_jtag_write_bytes(&buffer_espnow_rx[send][0], ADC_BUFFER_LEN + ESP_NOW_ETH_ALEN, portMAX_DELAY);
+            usb_serial_jtag_write_bytes(&buffer_espnow_rx[buffer_read_index][0], ADC_BUFFER_LEN + ESP_NOW_ETH_ALEN, portMAX_DELAY);
             usb_serial_jtag_ll_txfifo_flush();
+
+            buffer_read_index = (buffer_read_index + 1) % NUM_BUFFER;
         } else if (usb_serial_jtag_read_bytes(buffer_usb_rx, USB_MESSAGE_LEN, pdMS_TO_TICKS(1))) {
+            switch ((esp_command_t)buffer_usb_rx[0]) {
+                case espcommand_start:
+                    isRecording = true;
+                    break;
+                case espcommand_stop:
+                    isRecording = false;
+                    break;
+                default:
+                    break;
+            }
             // len = usb_serial_jtag_ll_read_rxfifo(buffer1, ADC_BUFFER_LEN * sizeof(uint8_t));
             ESP_LOGI("ESP-NOW", "Received USB-command. Starting measurement");
             REG_WRITE(GPIO_OUT_W1TS_REG, BIT2);  // LOW
@@ -87,21 +111,24 @@ void usb_task(void *pvParameters) {
 // Define the callback function to handle received data
 void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int data_len) {
     // Cast the received data to the defined structure
-    if (data_len <= ESP_NOW_MAX_DATA_LEN) {
-        memcpy(&buffer_espnow_rx[send][0], esp_now_info->src_addr, ESP_NOW_ETH_ALEN);
-        memcpy(&buffer_espnow_rx[send][ESP_NOW_ETH_ALEN], data, data_len);
-        // usb_serial_jtag_write_bytes(&buffer_espnow_rx[send][0], 2, 1 / portTICK_PERIOD_MS);
-        // ESP_LOGE("WARNING", "\nDATA %d - %d Buffer", ((uint16_t)data[3] << 8 | data[2]), ((uint16_t)buffer_espnow_rx[send][3] << 8) | buffer_espnow_rx[send][2]);
-
-        send++;
-        if (send >= NUM_BUFFER)  // overflow
-        {
+    if (isRecording) {
+        if ((buffer_write_index + 1) % NUM_BUFFER == buffer_read_index) {  // check for overflow
+            // handle buffer overflow error (e.g., drop data, assert, or raise an error)
+            ESP_LOGE("BUFFER", "Buffer overflow!\n");
+            return;
         }
+        buffer_write_index = (buffer_write_index++) % NUM_BUFFER;
+        buffer_count++;
+        memcpy(&buffer_espnow_rx[buffer_write_index][0], esp_now_info->src_addr, ESP_NOW_ETH_ALEN);  // add the src adress at the beginning
+        memcpy(&buffer_espnow_rx[buffer_write_index][ESP_NOW_ETH_ALEN], data, data_len);
+
     } else {
-        // Handle the case when the received data size is larger than the buffer size
-        // You may choose to truncate the data or handle it in a different way based on your application's requirements.
-        // Here, we are printing an error message.
-        ESP_LOGE("ESP-NOW", "Received data size is larger than the buffer size");
+        ESP_LOGW("ESP-NOW", "Ignoring data received while not recording. - Sending additional 'Stop' command");
+        const uint8_t stop_command = (uint8_t)espcommand_stop;
+        esp_err_t ret = esp_now_send(esp_now_info->src_addr, &stop_command, 1);
+        if (ret != ESP_OK) {
+            ESP_LOGE("ESP-NOW", "Error sending command: %s", esp_err_to_name(ret));
+        }
     }
 }
 static void espnow_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status) {
@@ -127,7 +154,6 @@ void esp_now_channel_broadcast(void *pvParameters) {
 
 void app_main() {
     esp_err_t ret;
-    vTaskDelay(pdMS_TO_TICKS(1000));
     // Initialize NVS
     gpio_set_direction(GPIO_NUM_2, GPIO_MODE_OUTPUT);
     REG_WRITE(GPIO_OUT_W1TC_REG, BIT2);  // LOW
